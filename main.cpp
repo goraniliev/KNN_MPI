@@ -2,28 +2,27 @@
 #include <stdlib.h>
 #include <mpi.h>
 #include <string.h>
+#include <time.h>
 
 #define send_data_tag 2001
 #define return_data_tag 2002
 #define send_output_tag 2003
 #define return_dist_tag 2004
 #define return_cnt_tag 2005
+#define ROOT_PROCESS 0
 
 #define DATA_SRC "iris.txt"
 #define MAX_LINE_LEN 256
-#define MAX_ROWS 150
+#define MAX_ROWS 1500000
 #define COLUMNS 4
 #define MAX_LABEL_LEN 25
-#define NUM_ELEMENTS 100
 #define MAX_PROCESSES 100
 
 double inputData[MAX_ROWS][COLUMNS];
 char outputData[MAX_ROWS][MAX_LABEL_LEN];
 double recvData[MAX_ROWS][COLUMNS];
 int labelsSent[MAX_ROWS], labelsRcvd[MAX_ROWS];
-char recvLabels[MAX_PROCESSES][MAX_LABEL_LEN];
 double partialDist[MAX_PROCESSES][3], partialCount[MAX_PROCESSES][3];
-double distances[3], counts[3];
 
 char *labels[] = {"Iris-setosa", "Iris-versicolor", "Iris-virginica"};
 
@@ -42,6 +41,7 @@ char *idToLabel(int id) {
 }
 
 void loadData() {
+    // Load data (columns are separated by comma and the last column is the class label
     FILE *fp = fopen(DATA_SRC, "r");
     char line[MAX_LINE_LEN];
     int row = 0;
@@ -69,6 +69,7 @@ void loadData() {
 }
 
 double dist(double a[], double b[]) {
+    // Returns Euclidean distance between 2 vectors a and b
     double d = 0.0;
     int i;
     for (i = 0; i < COLUMNS; i++) {
@@ -87,14 +88,12 @@ double avg(double *a, int len) {
 }
 
 int main() {
+    clock_t start = clock();
     MPI_Init(NULL, NULL);
     MPI_Status status;
     int num_rows_to_receive;
     int i = 0;
     int world_size;
-    //double distances[3], counts[3];
-    //double partialDist[3], partialCount[3];
-    double input[] = {5.0, 2.0, 3.5, 1.0};
 
     int ierr;
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
@@ -105,8 +104,13 @@ int main() {
     int num_rows_received;
     int num_rows_to_send;
     int sender;
-    if (world_rank == 0) {
+    if (world_rank == ROOT_PROCESS) {
+        // Read the data and split it accross the different slave processes.
         loadData();
+        //printf("Enter 4 space separated decimal numbers for the 4 different dimensions");
+//        scanf("Enter %lf %lf %lf %lf", &input[0], &input[1], &input[2], &input[3]);
+        double input[] = {6.4, 3.2, 4.5, 1.5};
+
         int id_process;
         // split data across processes
         for (id_process = 1; id_process < world_size; id_process++) {
@@ -115,8 +119,9 @@ int main() {
             if (MAX_ROWS - end_row < avg_rows_per_process) {
                 end_row = MAX_ROWS - 1;
             }
-            int num_rows_to_send = end_row - start_row + 1;
-            printf("Process %d start=%d end = %d\n", id_process, start_row, end_row);
+            int num_rows_to_send =
+                    end_row - start_row + 1;// determine the number of rows sent to id_process for processing
+            printf("Process %d start = %d end = %d\n", id_process, start_row, end_row);
             ierr = MPI_Send(&num_rows_to_send, 1, MPI_INT, id_process, send_data_tag, MPI_COMM_WORLD);
             ierr = MPI_Send(&inputData[start_row], num_rows_to_send, MPI_DOUBLE, id_process, send_data_tag,
                             MPI_COMM_WORLD);
@@ -126,14 +131,14 @@ int main() {
         }
 
         double distances[3], counts[3];
-
+        // Do the calculations which belong to the root process
         for (i = 0; i < avg_rows_per_process + 1; i++) {
-            //      int id_label = labelToId(outputData[i]);
             int id_label = labelsSent[i];
             distances[id_label] += dist(input, inputData[i]);
             counts[id_label]++;
         }
-        printf("Till partials good\n");
+
+
         // Add the partials from the other processes
         for (id_process = 1; id_process < world_size; id_process++) {
             ierr = MPI_Recv(&partialCount[id_process], 3, MPI_DOUBLE, MPI_ANY_SOURCE, return_cnt_tag, MPI_COMM_WORLD,
@@ -144,21 +149,25 @@ int main() {
             for (i = 0; i < 3; i++) {
                 distances[i] += partialDist[id_process][i];
                 counts[i] += partialCount[id_process][i];
-                printf("Process %d class %d Partial Count %f and Partial Dist %f \n", sender, i,
+                printf("Process %d class for class %s Partial Count %f and Partial Dist %f \n", sender, idToLabel(i),
                        partialCount[id_process][i], partialDist[id_process][i]);
             }
         }
-        printf("Before avg good\n");
-        double minDistId = 0, minDist = distances[0] / counts[0];
+// Determine the class by choosing the one with minimal distance
+        int minDistId = 0;
+        double minDist = distances[0] / counts[0];
         for (i = 0; i < 3; i++) {
             double avg = distances[i] / counts[i];
             if (avg < minDist) {
                 minDist = avg;
                 minDistId = i;
             }
-            printf("Distance from class %d is %f", i, avg);
+            printf("Distance from class %s is %f\n", idToLabel(i), avg);
         }
-        printf("The input belongs to class %s\n", idToLabel(minDistId));
+        printf("The input is classified in class %s\n", idToLabel(minDistId));
+        clock_t end = clock();
+        double time_spent = (double) (end - start) / CLOCKS_PER_SEC;
+        printf("Total time spent: %lf seconds\n", time_spent);
     }
     else {//other process
         ierr = MPI_Recv(&num_rows_to_receive, 1, MPI_INT, 0, send_data_tag, MPI_COMM_WORLD, &status);
@@ -168,12 +177,6 @@ int main() {
 
         num_rows_received = num_rows_to_receive;
         printf("Process %d processes %d rows\n", world_rank, num_rows_to_receive);
-        for (i = 0; i < 3; i++) {
-            printf("%d %f %s\n", world_rank, recvData[world_rank][i], recvLabels[i]);
-        }
-
-        //double partialDist[3], partialCount[3];
-        double this_process_count[3], this_process_dist[3];
         for (i = 0; i < 3; i++) {
             partialCount[world_rank][i] = partialDist[world_rank][i] = 0;
         }
@@ -188,4 +191,3 @@ int main() {
 
     ierr = MPI_Finalize();
 }
-
